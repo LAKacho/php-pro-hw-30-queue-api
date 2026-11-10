@@ -1,0 +1,11 @@
+RewriteEngine On
+
+# Существующие файлы (openapi.yaml, style.css и т.п.) отдаются Apache напрямую
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Все прочие маршруты — во фронт-контроллер
+RewriteRule ^ index.php [L]
+
+AddType application/yaml .yaml

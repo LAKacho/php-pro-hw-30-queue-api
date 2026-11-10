@@ -1,0 +1,44 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: secret
+    ports:
+      - "15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  web:
+    build: .
+    environment: &app-environment
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: app
+      RABBITMQ_PASSWORD: secret
+      RABBITMQ_QUEUE: statement_requests
+      STORAGE_DIR: /app/var/requests
+    ports:
+      - "8081:80"
+    volumes:
+      - request-data:/app/var/requests
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["php", "/app/bin/worker.php"]
+    restart: unless-stopped
+    environment: *app-environment
+    volumes:
+      - request-data:/app/var/requests
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  request-data:

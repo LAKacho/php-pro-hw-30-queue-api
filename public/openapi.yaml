@@ -1,0 +1,324 @@
+openapi: 3.0.3
+info:
+  title: API обработки заявок на выписку
+  description: |
+    REST API с асинхронной обработкой через очередь RabbitMQ.
+
+    Сценарий работы клиента:
+
+    1. `POST /api/v1/requests` — отправить заявку. API мгновенно возвращает `202 Accepted` и номер заявки (`id`), сама заявка помещена в очередь.
+    2. `GET /api/v1/requests/{id}` — периодически опрашивать статус по номеру заявки. Возможные статусы: `queued`, `processing`, `completed`.
+    3. Когда статус станет `completed`, в ответе появится поле `report` с результатом обработки.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8081
+tags:
+  - name: requests
+    description: Заявки на формирование выписки
+
+paths:
+  /api/v1/requests:
+    post:
+      tags: [requests]
+      summary: Создать заявку
+      description: |
+        Валидирует тело запроса, публикует заявку в очередь RabbitMQ и сразу
+        возвращает номер заявки. Обработка выполняется фоновым worker-ом.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRequestInput'
+            example:
+              email: user@example.com
+              dateFrom: 2025-01-01
+              dateTo: 2025-06-30
+      responses:
+        '202':
+          description: Заявка принята и поставлена в очередь
+          headers:
+            Location:
+              description: URL для опроса статуса
+              schema:
+                type: string
+                example: /api/v1/requests/a1b2c3d4e5f60718
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedRequest'
+        '400':
+          description: Некорректное тело запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  message: Некорректное тело запроса.
+                  details:
+                    email: Укажите корректный email.
+        '503':
+          description: Очередь недоступна
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      tags: [requests]
+      summary: Список всех заявок
+      responses:
+        '200':
+          description: Список заявок с текущими статусами
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestList'
+
+  /api/v1/requests/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      tags: [requests]
+      summary: Статус заявки по номеру
+      description: |
+        Клиент периодически вызывает этот эндпоинт, пока `status` не станет
+        `completed`. В завершённом ответе присутствует `report`.
+      responses:
+        '200':
+          description: Текущий статус заявки
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PendingRequestStatus'
+                  - $ref: '#/components/schemas/CompletedRequestStatus'
+              examples:
+                queued:
+                  summary: В очереди
+                  value:
+                    id: a1b2c3d4e5f60718
+                    status: queued
+                    request:
+                      id: a1b2c3d4e5f60718
+                      email: user@example.com
+                      dateFrom: "2025-01-01"
+                      dateTo: "2025-06-30"
+                    statusUrl: /api/v1/requests/a1b2c3d4e5f60718
+                processing:
+                  summary: Обрабатывается
+                  value:
+                    id: a1b2c3d4e5f60718
+                    status: processing
+                    request:
+                      id: a1b2c3d4e5f60718
+                      email: user@example.com
+                      dateFrom: "2025-01-01"
+                      dateTo: "2025-06-30"
+                    statusUrl: /api/v1/requests/a1b2c3d4e5f60718
+                completed:
+                  summary: Готово
+                  value:
+                    id: a1b2c3d4e5f60718
+                    status: completed
+                    request:
+                      id: a1b2c3d4e5f60718
+                      email: user@example.com
+                      dateFrom: "2025-01-01"
+                      dateTo: "2025-06-30"
+                    report:
+                      period: 01.01.2025 — 30.06.2025
+                      openingBalance: 1234.56
+                      closingBalance: 12384.06
+                      operations:
+                        - date: "2025-01-01"
+                          description: Входящий перевод
+                          amount: 12500.00
+                        - date: "2025-06-30"
+                          description: Оплата услуг
+                          amount: -1350.50
+                    completedAt: "2025-06-30T12:00:00+03:00"
+                    statusUrl: /api/v1/requests/a1b2c3d4e5f60718
+        '404':
+          description: Заявка не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/health:
+    get:
+      tags: [requests]
+      summary: Проверка доступности API
+      responses:
+        '200':
+          description: API работает
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  requests:
+                    type: integer
+                    example: 3
+
+components:
+  parameters:
+    RequestId:
+      name: id
+      in: path
+      required: true
+      description: Номер заявки, полученный при создании (16 hex-символов)
+      schema:
+        type: string
+        pattern: '^[a-f0-9]{16}$'
+        example: a1b2c3d4e5f60718
+
+  schemas:
+    CreateRequestInput:
+      type: object
+      required: [email, dateFrom, dateTo]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Email заявителя
+          example: user@example.com
+        dateFrom:
+          type: string
+          format: date
+          description: Начало периода
+          example: 2025-01-01
+        dateTo:
+          type: string
+          format: date
+          description: Конец периода (не может быть в будущем)
+          example: 2025-06-30
+
+    AcceptedRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Номер заявки для опроса статуса
+          example: a1b2c3d4e5f60718
+        status:
+          type: string
+          example: queued
+        createdAt:
+          type: string
+          format: date-time
+        statusUrl:
+          type: string
+          example: /api/v1/requests/a1b2c3d4e5f60718
+
+    PendingRequestStatus:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing]
+        request:
+          $ref: '#/components/schemas/RequestPayload'
+        statusUrl:
+          type: string
+
+    CompletedRequestStatus:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [completed]
+        request:
+          $ref: '#/components/schemas/RequestPayload'
+        report:
+          $ref: '#/components/schemas/StatementReport'
+        completedAt:
+          type: string
+          format: date-time
+        statusUrl:
+          type: string
+
+    RequestPayload:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        dateFrom:
+          type: string
+          format: date
+        dateTo:
+          type: string
+          format: date
+        createdAt:
+          type: string
+          format: date-time
+
+    StatementReport:
+      type: object
+      properties:
+        period:
+          type: string
+          example: 01.01.2025 — 30.06.2025
+        openingBalance:
+          type: number
+          example: 1234.56
+        closingBalance:
+          type: number
+          example: 12384.06
+        operations:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              description:
+                type: string
+              amount:
+                type: number
+
+    RequestList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              status:
+                type: string
+                enum: [queued, processing, completed]
+              createdAt:
+                type: string
+                format: date-time
+              statusUrl:
+                type: string
+        total:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            details:
+              type: object
+              nullable: true
+              description: Детали по полям (для 400)
